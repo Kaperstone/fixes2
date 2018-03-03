@@ -22,4 +22,4 @@ FIXES: clean
 	$(GPP) $(FIXES) ./SDK/amx/*.c -lrt
 	$(GPP) $(FIXES) ./SDK/*.cpp -lrt
 	$(GPP) $(FIXES) *.cpp -lrt
-	$(GPP) -m32 -O2 -fshort-wchar -shared -o $(FIXES_OUTFILE) -lrt *.o
+	$(GPP) -m32 -O2 -fshort-wchar -shared -o $(FIXES_OUTFILE) *.o -lrt

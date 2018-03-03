@@ -26,6 +26,8 @@
  *  SA:MP Team past, present and future
  */
 
+// KillTimer fixed by .silent
+
 #include <malloc.h>
 #include <string.h>
 #include <stdio.h>
@@ -35,6 +37,9 @@
 #include <functional>
 
 #include <iostream>
+#include <fstream>
+#include <stdarg.h>
+#include <time.h>
 
 #include "fixes.h"
 
@@ -44,6 +49,9 @@
 #ifdef LINUX
 	#include <sys/mman.h>
 	#include <time.h>
+	#include <alloca.h>
+	#include <stdlib.h>
+	#include <unistd.h>
 	
 	long long unsigned int
 		MicrosecondTime()
@@ -52,7 +60,7 @@
 			ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		//return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-		return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+		return ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
 	}
 #else
 	#define VC_EXTRALEAN
@@ -143,6 +151,10 @@ struct TimerCompare : public std::binary_function<struct timer_s *, struct timer
 logprintf_t
 	logprintf;
 
+AMX_NATIVE
+	pPrint,
+	pPrintF;
+
 // Order the timers by trigger time.
 std::priority_queue<
 		// Store times.
@@ -166,13 +178,17 @@ AMX *
 	gAMXFiles[17];
 
 char
+	gLogTimeFormat[32] = "[%H:%M:%S]",
 	gLogprintfAssembly[5];
 
 bool
+	bDoLog,
 	bInPrint;
 
 unsigned int
 	gCurrentTimer = 0;
+
+int gKilledTimer = -1;
 
 //AMX_NATIVE
 //	SetTimer;
@@ -223,11 +239,26 @@ int
 	vsnprintf(dst, 1024, str, ap);
 	va_end(ap);
 	printf("%s\n", dst);
+	if (bDoLog)
+	{
+		// Re-enable logging.
+		std::ofstream
+			f("server_log.txt", std::fstream::app | std::fstream::out);
+		if (f.is_open())
+		{
+			char
+				ft[32];
+			time_t
+				t;
+			time(&t);
+			strftime(ft, sizeof (ft), gLogTimeFormat, localtime(&t));
+			f << ft << ' ' << dst << std::endl;
+			f.close();
+		}
+	}
+	// So we can use "printf" without getting stuck in endless loops.
 	if (!bInPrint)
 	{
-		// So we can use "printf" without getting stuck in endless loops.
-		bInPrint = true;
-		//std::cout << "fixes.plugin: " << dst << std::endl;
 		for (int i = 0; i != 17; ++i)
 		{
 			if (gAMXPtr[i] != -1)
@@ -240,17 +271,11 @@ int
 				amx_Release(gAMXFiles[i], addr);
 				if (ret == 1)
 				{
-					bInPrint = false;
 					return 1;
 				}
 			}
 		}
-		bInPrint = false;
 	}
-	//asm
-	//{
-	//	
-	//}
 	return 1;
 }
 
@@ -332,8 +357,17 @@ PLUGIN_EXPORT int PLUGIN_CALL
 					}
 					p0 = p0->next;
 				}
-				switch (next->repeat)
+
+				if (gKilledTimer == next->id)
 				{
+					DestroyTimer(next);
+					gKilledTimer = -1;
+				}
+				else
+				{
+					switch (next->repeat)
+					{
+					case 0:
 					case 1:
 						DestroyTimer(next);
 						break;
@@ -345,6 +379,7 @@ PLUGIN_EXPORT int PLUGIN_CALL
 						next->trigger += next->interval;
 						gTimers.push(next);
 						break;
+					}
 				}
 			}
 			else
@@ -420,8 +455,8 @@ static cell
 							}
 							return (cell)gCurrentTimer;
 						}
-						case 'i': case 'f': case 'x': case 'h': case 'b': case 'c': case 'l':
-						case 'I': case 'F': case 'X': case 'H': case 'B': case 'C': case 'L':
+						case 'i': case 'f': case 'x': case 'h': case 'b': case 'c': case 'l': case 'd':
+						case 'I': case 'F': case 'X': case 'H': case 'B': case 'C': case 'L': case 'D':
 						{
 							struct params_s *
 								p0 = (struct params_s *)malloc(sizeof (struct params_s));
@@ -478,8 +513,8 @@ static cell
 						{
 							switch (*fmat)
 							{
-								case 'i': case 'x': case 'h': case 'b':
-								case 'I': case 'X': case 'H': case 'B':
+								case 'i': case 'x': case 'h': case 'd':
+								case 'I': case 'X': case 'H': case 'D':
 								{
 									cell *
 										cstr;
@@ -575,10 +610,33 @@ static cell AMX_NATIVE_CALL
 	if (it != gHandles.end() && (*it).second->amx == amx)
 	{
 		// Can't remove it yet because it's stuck in a queue.
+		gKilledTimer = (*it).second->id;
 		(*it).second->repeat = 0;
 		gHandles.erase(params[1]);
 	}
 	return 0;
+}
+
+// Intercept "print" and "printf" to just log them (relatively) normally.
+static cell AMX_NATIVE_CALL
+	n_print(AMX * amx, cell * params)
+{
+	bInPrint = true;
+	cell
+		ret = pPrint(amx, params);
+	bInPrint = false;
+	return ret;
+}
+
+// native SetTimerEx_(const function[], const delay, const interval, const count, const format[], {Float, _}:...);
+static cell AMX_NATIVE_CALL
+	n_printf(AMX * amx, cell * params)
+{
+	bInPrint = true;
+	cell
+		ret = pPrintF(amx, params);
+	bInPrint = false;
+	return ret;
 }
 
 #if SSCANF_QUIET
@@ -588,6 +646,48 @@ static cell AMX_NATIVE_CALL
 		// Do nothing
 	}
 #endif
+
+// Load an entry from server.cfg.
+int
+	CFGLoad(char const * const name, char * const dest, size_t dlen)
+{
+	std::ifstream
+		f("server.cfg");
+	int
+		ret = 1,
+		len = strlen(name);
+	if (f.is_open())
+	{
+		char
+			line[256];
+		f.clear();
+		while (!f.eof())
+		{
+			f.getline(line, 256);
+			if (f.fail())
+			{
+				goto CFGLoad_close;
+			}
+			// Does the line START with this text?  Anything other than the
+			// first character fails.
+			if (!strncmp(line, name, len) && line[len] <= ' ')
+			{
+				while (line[++len] <= ' ')
+				{
+					if (line[len] == '\0') goto CFGLoad_close;
+				}
+				// Skipped leading spaces, save the value.
+				if (dest) strncpy(dest, line + len, dlen);
+				ret = atoi(line + len);
+				goto CFGLoad_close;
+			}
+		}
+CFGLoad_close:
+		// Yes, I used a label!  I needed to escape from a double loop.
+		f.close();
+	}
+	return ret;
+}
 
 //----------------------------------------------------------
 // The Support() function indicates what possibilities this
@@ -620,12 +720,14 @@ PLUGIN_EXPORT bool PLUGIN_CALL
 	//logprintf("0x%08X\n", (int)logprintf);
 	logprintf("\n");
 	logprintf(" ===============================\n");
-	logprintf("       fixes plugin loaded.     \n");
+	logprintf("       fixes2 plugin loaded.     \n");
 	logprintf("   (c) 2012 Alex \"Y_Less\" Cole\n");
 	logprintf(" ===============================\n");
 	
-	AssemblyRedirect(logprintf, FIXES_logprintf, gLogprintfAssembly);
+	AssemblyRedirect((void *)logprintf, (void *)FIXES_logprintf, gLogprintfAssembly);
 	bInPrint = false;
+	CFGLoad("logtimeformat", gLogTimeFormat, sizeof (gLogTimeFormat));
+	bDoLog = !!CFGLoad("enablelog", 0, 0);
 	
 	#ifndef LINUX
 	LARGE_INTEGER
@@ -725,8 +827,8 @@ PLUGIN_EXPORT int PLUGIN_CALL
 	Redirect(amx, "SetTimer", (ucell)n_SetTimer, 0);
 	Redirect(amx, "KillTimer", (ucell)n_KillTimer, 0);
 	Redirect(amx, "SetTimerEx", (ucell)n_SetTimerEx, 0);
-	//Redirect(amx, "print", (ucell)n_print, 0);
-	//Redirect(amx, "printf", (ucell)n_printf, 0);
+	Redirect(amx, "print", (ucell)n_print, &pPrint);
+	Redirect(amx, "printf", (ucell)n_printf, &pPrintF);
 	for (int i = 0; i != 17; ++i)
 	{
 		if (gAMXFiles[i] == 0)
